@@ -1,6 +1,6 @@
 {
   "name": "pearl-2p",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "O Pearl-2P é um servidor de sinalização (Signaling Server) robusto, leve e extensível projetado para facilitar o handshake e a troca de candidatos ICE entre pares (peers) em aplicações P2P (Peer-to-Peer), como WebRTC.",
   "main": "pearl.js",
   "scripts": {
