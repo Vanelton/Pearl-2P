@@ -38,7 +38,7 @@ O servidor iniciará na porta 19950 por padrão.
 ## 🔌 Protocolo de Comunicação (API)
 O servidor utiliza WebSockets. Todas as mensagens devem ser enviadas em formato JSON stringified.
 
-1. Conectando (Client -> Server)
+### 1. Conectando (Client -> Server)
 
 Ao se conectar, o servidor envia automaticamente um evento de boas-vindas contendo o seu ID.
 
@@ -51,7 +51,7 @@ Resposta do Servidor:
 }
 ```
 
-2. Sinalização P2P (Signal)
+### 2. Sinalização P2P (Signal)
 
 Use este tipo de mensagem para enviar dados WebRTC (Offer, Answer ou Candidate) para outro peer.
 
@@ -79,7 +79,7 @@ Recebimento (Server -> Client B):
 }
 ```
 
-3. Tratamento de Erros
+### 3. Tratamento de Erros
 
 Se você tentar enviar uma mensagem para um ID que não existe:
 
