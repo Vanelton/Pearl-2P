@@ -1,10 +1,10 @@
 # Pearl-2P Signaling Server (Multi-Project Host Logic)
 Um servidor de sinalização Opensource agnóstico, projetado para servir múltiplos projetos simultaneamente com lógica de descoberta automática de Host.
 
-**Autores do código:** Vanelton Junior, Lucas de Morais, Gemini CLI (Google)
+**Autores do código:** Vanelton Junior, Lucas de Morais
 **Organização:** Vanelton Open Labs / Vanelton Media
 
-## 📖 Como Funciona (Lógica da Espinha Dorsal)
+## 📖 Como Funciona
 Diferente de servidores simples que apenas trocam mensagens, o Pearl-2P gerencia Salas Virtuais. A lógica é focada na distribuição de IDs baseada em "Quem chegou primeiro".
 
 - Host Automático: Ao enviar os dados do seu projeto, se a sala não existir, você se torna o Host.
