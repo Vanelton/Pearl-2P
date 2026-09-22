@@ -2,26 +2,46 @@
  * ===========================================================================================
  * Pearl-2P (Signaling Server)
  * ORGANIZAÇÃO:     Vanelton Open Labs / Vanelton Media
- * VERSÃO:          1.0.1
+ * VERSÃO:          1.1.0
  * LICENÇA:         MIT License
  *
  * DESCRIÇÃO:
  * O Pearl-2P é um servidor de sinalização agnóstico.
- * Ele permite que múltiplos projetos utilizem o mesmo servidor WebSocket.
- * A conexão é baseada na estrutura: PROJETO -> INSTÂNCIA -> SALA.
  *
- * Este servidor atua como um intermediário para que dois clientes, que ainda não se conhecem,
- * possam trocar informações de rede e mídia antes de estabelecerem uma conexão direta.
+ * A identificação de uma sala utiliza três propriedades:
+ *
+ *     PROJECT -> INSTANCE -> KEY
+ *
+ * `project` identifica o projeto ao qual a sala pertence.
+ * `instance` permite separar diferentes instâncias dentro do mesmo projeto.
+ * `key` identifica a sala dentro dessa combinação.
+ *
+ * A `instance` utiliza "default" quando não é informada.
+ *
+ * Informações adicionais podem ser armazenadas em `metadata`.
+ * Sua estrutura é definida pelo cliente e não é interpretada pelo servidor.
+ *
+ * Exemplo:
+ *
+ *     metadata: {
+ *         name: "My Room",
+ *         mode: 1
+ *     }
+ *
+ * O servidor atua como intermediário para que clientes possam trocar
+ * informações necessárias para estabelecer uma conexão direta.
  *
  * CARACTERÍSTICAS:
- * - Arquitetura baseada em Eventos e Classes.
- * - Dependências mínimas (apenas 'ws').
- * - Suporte a salas (rooms) ou conexões diretas por ID.
- * - Logs estruturados para depuração.
- *
- * DESENVOLVEDORES & COLABORADORES:
- * - Vanelton Open Labs
- * - Vanelton Media
+ * - Arquitetura baseada em eventos e classes.
+ * - Dependência mínima (apenas `ws`).
+ * - Suporte a múltiplos projetos e instâncias.
+ * - Suporte a salas identificadas por `project`, `instance` e `key`.
+ * - Metadata definido pelo cliente.
+ * - Roteamento de sinalização WebRTC.
+ * - Roteamento de dados.
+ * - Listagem de salas ativas.
+ * - Heartbeat para conexões.
+ * - Logs estruturados.
  *
  * ===========================================================================================
  */
@@ -30,140 +50,335 @@ const WebSocket = require('ws');
 const http = require('http');
 const crypto = require('crypto');
 
-// Configurações Padrão
+// ===========================================================================================
+// CONFIGURATION
+// ===========================================================================================
+
 const DEFAULT_PORT = 19950;
-const PING_INTERVAL = 30000; // 30 segundos para heartbeat
 
 /**
- * Classe Peer
- * Representa um cliente conectado.
+ * Interval between heartbeat checks.
+ */
+const PING_INTERVAL = 30000;
+
+// ===========================================================================================
+// PEER
+// ===========================================================================================
+
+/**
+ * Represents a connected client.
  */
 class Peer {
     constructor(socket, id) {
         this.socket = socket;
         this.id = id;
+
+        /**
+         * Used by the heartbeat system to detect inactive connections.
+         */
         this.isAlive = true;
-        
-        // Metadados da Sala
-        this.roomKey = null; // Chave única da sala (ex: projeto#instancia#sala)
-        this.isHost = false; // Define se este peer é o dono da sala
+
+        /**
+         * Internal identifier of the room this peer belongs to.
+         */
+        this.roomKey = null;
+
+        /**
+         * Whether this peer is the Host of its room.
+         */
+        this.isHost = false;
     }
 }
 
-/**
- * Classe Principal do Servidor
- */
+// ===========================================================================================
+// PEARL-2P SERVER
+// ===========================================================================================
+
 class Pearl2PServer {
     constructor(port = DEFAULT_PORT) {
         this.port = port;
+
+        /**
+         * HTTP server used as the underlying server for WebSocket connections.
+         */
         this.server = http.createServer();
+
         this.wss = null;
-        
-        // Mapa de Peers: ID -> Objeto Peer
+
+        /**
+         * Connected peers.
+         *
+         * peerId -> Peer
+         */
         this.peers = new Map();
-        
-        // Mapa de Salas: RoomKey -> { hostId: String, peers: Set<String> }
+
+        /**
+         * Active rooms.
+         *
+         * roomKey -> room data
+         *
+         * The internal room key is composed from:
+         *
+         *     project + instance + key
+         */
         this.rooms = new Map();
 
         this.init();
     }
 
-    init() {
-        this.wss = new WebSocket.Server({ server: this.server });
+    // =======================================================================================
+    // INITIALIZATION
+    // =======================================================================================
 
-        this.wss.on('connection', (socket) => this.handleConnection(socket));
+    /**
+     * Initializes the WebSocket server, connection events and heartbeat system.
+     */
+    init() {
+        this.wss = new WebSocket.Server({
+            server: this.server
+        });
+
+        this.wss.on(
+            'connection',
+            (socket) => this.handleConnection(socket)
+        );
+
         this.startHeartbeat();
 
         this.server.listen(this.port, () => {
-            this.log(`Pearl-2P Server v2.0 rodando na porta ${this.port}`);
-            this.log(`Modo: Host-Oriented (Multi-Project Support)`);
+            this.log(
+                `Pearl-2P Server v1.1.0 running on port ${this.port}`
+            );
+
+            this.log(
+                `Mode: Host-Oriented (Multi-Project Support)`
+            );
         });
     }
 
+    // =======================================================================================
+    // CONNECTION
+    // =======================================================================================
+
+    /**
+     * Handles a new WebSocket connection.
+     *
+     * Each connection receives a short randomly generated peer ID.
+     */
     handleConnection(socket) {
         const peerId = this.generateId();
         const peer = new Peer(socket, peerId);
 
         this.peers.set(peerId, peer);
-        this.log(`Novo Peer conectado: ${peerId}`);
 
-        // 1. Envia ID para o cliente saber quem é
+        this.log(
+            `New peer connected: ${peerId}`
+        );
+
+        /**
+         * Sends the generated peer ID to the client.
+         *
+         * The client must use this ID when communicating with other peers
+         * through the signaling server.
+         */
         this.send(peer, {
             type: 'welcome',
             id: peerId,
-            message: 'Conectado ao Pearl-2P. Aguardando dados da sala (join-room).'
+            message: 'Connected to Pearl-2P. Waiting for room data (join-room).'
         });
 
-        socket.on('message', (message) => this.handleMessage(peer, message));
-        socket.on('close', () => this.handleDisconnect(peer));
-        socket.on('error', (err) => this.log(`Erro no Peer ${peerId}: ${err.message}`, 'ERROR'));
-        socket.on('pong', () => { peer.isAlive = true; });
+        socket.on(
+            'message',
+            (message) => this.handleMessage(peer, message)
+        );
+
+        socket.on(
+            'close',
+            () => this.handleDisconnect(peer)
+        );
+
+        socket.on(
+            'error',
+            (err) => this.log(
+                `Peer ${peerId} error: ${err.message}`,
+                'ERROR'
+            )
+        );
+
+        socket.on(
+            'pong',
+            () => {
+                peer.isAlive = true;
+            }
+        );
     }
 
+    // =======================================================================================
+    // MESSAGE HANDLING
+    // =======================================================================================
+
+    /**
+     * Processes messages received from clients.
+     *
+     * Supported message types:
+     *
+     * - join-room
+     * - signal
+     * - data
+     * - list-rooms
+     */
     handleMessage(sender, messageData) {
         try {
             const data = JSON.parse(messageData);
 
             switch (data.type) {
                 case 'join-room':
-                    // Lógica principal: define quem é Host e quem é Cliente
-                    this.handleJoinRoom(sender, data.payload);
+                    this.handleJoinRoom(
+                        sender,
+                        data.payload
+                    );
                     break;
 
                 case 'signal':
-                    // Roteamento de WebRTC (SDP/ICE) direto entre IDs
-                    this.routeSignal(sender, data);
+                    this.routeSignal(
+                        sender,
+                        data
+                    );
                     break;
-                
-                // Caso precise enviar dados genéricos do jogo/app via server
-                case 'data': 
-                    this.routeData(sender, data);
+
+                case 'data':
+                    this.routeData(
+                        sender,
+                        data
+                    );
+                    break;
+
+                case 'list-rooms':
+                    this.handleListRooms(
+                        sender,
+                        data.payload
+                    );
                     break;
 
                 default:
-                    this.log(`Tipo desconhecido de ${sender.id}: ${data.type}`, 'WARN');
+                    this.log(
+                        `Unknown message type from ${sender.id}: ${data.type}`,
+                        'WARN'
+                    );
+                    break;
             }
-
         } catch (error) {
-            this.log(`Erro ao processar msg de ${sender.id}: ${error.message}`, 'ERROR');
+            this.log(
+                `Error processing message from ${sender.id}: ${error.message}`,
+                'ERROR'
+            );
         }
     }
 
+    // =======================================================================================
+    // CREATE / JOIN ROOM
+    // =======================================================================================
+
     /**
-     * LÓGICA CENTRAL: Gerenciamento de Salas e Hosts
-     * Payload esperado: { project: "nome", instance: "v1", room: "sala1" }
+     * Creates a room or joins an existing one.
+     *
+     * Required properties:
+     *
+     *     project
+     *     key
+     *
+     * Optional:
+     *
+     *     instance
+     *     metadata
+     *
+     * `instance` defaults to "default".
+     *
+     * `metadata` is completely defined by the client and is stored and
+     * returned by the server without interpreting its contents.
      */
     handleJoinRoom(peer, payload) {
-        if (!payload || !payload.project || !payload.room) {
-            return this.sendError(peer, 400, 'Dados de projeto/sala incompletos.');
+        if (
+            !payload ||
+            !payload.project ||
+            !payload.key
+        ) {
+            return this.sendError(
+                peer,
+                400,
+                'Missing data: project and key are required.'
+            );
         }
 
-        // Cria uma chave única para isolar projetos diferentes
-        const instance = payload.instance || 'default';
-        const roomKey = `${payload.project}#${instance}#${payload.room}`;
+        const project = String(payload.project);
+        const instance = String(
+            payload.instance || 'default'
+        );
+        const key = String(payload.key);
 
-        // Verifica se a sala já existe
+        /**
+         * Metadata must be an object.
+         *
+         * Arrays and other value types are not accepted as room metadata.
+         */
+        const metadata =
+            payload.metadata &&
+            typeof payload.metadata === 'object' &&
+            !Array.isArray(payload.metadata)
+                ? payload.metadata
+                : {};
+
+        /**
+         * A room is uniquely identified by:
+         *
+         *     project + instance + key
+         */
+        const roomKey = `${project}#${instance}#${key}`;
+
+        // ===================================================================================
+        // EXISTING ROOM
+        // ===================================================================================
+
         if (this.rooms.has(roomKey)) {
-            // --- SALA EXISTE: Conectar como CLIENTE ---
             const roomData = this.rooms.get(roomKey);
-            
-            // Registra peer na sala
+
+            /**
+             * Existing rooms are Host-oriented.
+             * New peers join as clients.
+             */
             roomData.peers.add(peer.id);
+
             peer.roomKey = roomKey;
             peer.isHost = false;
 
-            this.log(`Peer ${peer.id} entrou na sala '${roomKey}' como CLIENTE.`);
+            this.log(
+                `Peer ${peer.id} joined room '${roomKey}' as CLIENT.`
+            );
 
-            // 1. Avisa o peer quem é o HOST (para ele mandar o Offer)
+            /**
+             * Sends the existing room information to the new client.
+             *
+             * The metadata belongs to the room created by the Host.
+             * The metadata supplied by a joining client is therefore not used
+             * to modify the existing room.
+             */
             this.send(peer, {
                 type: 'room-joined',
                 role: 'client',
-                room: payload.room,
-                hostId: roomData.hostId // O peer usa isso para iniciar conexão P2P
+                project: roomData.project,
+                instance: roomData.instance,
+                key: roomData.key,
+                hostId: roomData.hostId,
+                metadata: roomData.metadata
             });
 
-            // 2. Avisa o Host que alguém entrou (opcional, mas útil)
-            const hostPeer = this.peers.get(roomData.hostId);
+            /**
+             * Notifies the Host that a new peer has joined.
+             */
+            const hostPeer = this.peers.get(
+                roomData.hostId
+            );
+
             if (hostPeer) {
                 this.send(hostPeer, {
                     type: 'peer-joined',
@@ -171,131 +386,370 @@ class Pearl2PServer {
                 });
             }
 
-        } else {
-            // --- SALA NÃO EXISTE: Criar como HOST ---
-            const newRoom = {
-                hostId: peer.id,
-                peers: new Set() // Lista de outros peers na sala
-            };
-
-            this.rooms.set(roomKey, newRoom);
-            peer.roomKey = roomKey;
-            peer.isHost = true;
-
-            this.log(`Sala criada: '${roomKey}' pelo Host ${peer.id}`);
-
-            this.send(peer, {
-                type: 'room-created',
-                role: 'host',
-                room: payload.room,
-                message: 'Você é o Host. Aguardando peers...'
-            });
+            return;
         }
+
+        // ===================================================================================
+        // NEW ROOM
+        // ===================================================================================
+
+        /**
+         * The first peer to create the room becomes its Host.
+         *
+         * The Host owns the room session. If the Host disconnects,
+         * the room is closed and the remaining clients are notified.
+         */
+        const newRoom = {
+            project,
+            instance,
+            key,
+            hostId: peer.id,
+
+            /**
+             * The Host is stored separately through `hostId`.
+             * Only clients are stored in this Set.
+             */
+            peers: new Set(),
+
+            /**
+             * Metadata is stored exactly as provided by the client.
+             */
+            metadata
+        };
+
+        this.rooms.set(
+            roomKey,
+            newRoom
+        );
+
+        peer.roomKey = roomKey;
+        peer.isHost = true;
+
+        this.log(
+            `Room created: '${roomKey}' by Host ${peer.id}`
+        );
+
+        /**
+         * Confirms room creation to the Host.
+         */
+        this.send(peer, {
+            type: 'room-created',
+            role: 'host',
+            project,
+            instance,
+            key,
+            metadata
+        });
     }
 
+    // =======================================================================================
+    // LIST ROOMS
+    // =======================================================================================
+
     /**
-     * Roteamento de Sinais (Offer, Answer, Candidate)
+     * Returns the active rooms visible to the requesting client.
+     *
+     * `project` and `instance` can optionally be used as filters.
+     */
+    handleListRooms(peer, payload = {}) {
+        const roomsList = [];
+
+        this.rooms.forEach(
+            (roomData) => {
+                if (
+                    payload.project &&
+                    payload.project !== roomData.project
+                ) {
+                    return;
+                }
+
+                if (
+                    payload.instance &&
+                    payload.instance !== roomData.instance
+                ) {
+                    return;
+                }
+
+                roomsList.push({
+                    project: roomData.project,
+                    instance: roomData.instance,
+                    key: roomData.key,
+                    hostId: roomData.hostId,
+
+                    /**
+                     * The Host is not included in the peer Set,
+                     * so it is added to the client count here.
+                     */
+                    peerCount: roomData.peers.size + 1,
+
+                    metadata: roomData.metadata
+                });
+            }
+        );
+
+        this.send(peer, {
+            type: 'rooms-list',
+            total: roomsList.length,
+            rooms: roomsList
+        });
+
+        this.log(
+            `Peer ${peer.id} requested room list (${roomsList.length} found).`
+        );
+    }
+
+    // =======================================================================================
+    // SIGNAL ROUTING
+    // =======================================================================================
+
+    /**
+     * Routes WebRTC signaling messages between peers.
+     *
+     * The server does not interpret the signaling payload.
+     * It only forwards it to the peer identified by `target`.
      */
     routeSignal(sender, data) {
         const targetId = data.target;
         const targetPeer = this.peers.get(targetId);
 
         if (targetPeer) {
-            this.send(targetPeer, {
-                type: 'signal',
-                sender: sender.id, // Quem mandou (para o destinatário saber responder)
-                payload: data.payload
-            });
+            this.send(
+                targetPeer,
+                {
+                    type: 'signal',
+                    sender: sender.id,
+                    payload: data.payload
+                }
+            );
         } else {
-            // Se o alvo não existe, avisa o remetente (pode ter desconectado)
-            this.sendError(sender, 404, 'Peer alvo desconectado.');
+            this.sendError(
+                sender,
+                404,
+                'Target peer is disconnected.'
+            );
         }
     }
 
+    // =======================================================================================
+    // DATA ROUTING
+    // =======================================================================================
+
     /**
-     * Roteamento de dados genéricos (chat, estado simples)
+     * Routes generic application data between peers.
+     *
+     * Like signaling messages, the payload is not interpreted by the server.
      */
     routeData(sender, data) {
         const targetId = data.target;
         const targetPeer = this.peers.get(targetId);
+
         if (targetPeer) {
-            this.send(targetPeer, {
-                type: 'data',
-                sender: sender.id,
-                payload: data.payload
-            });
+            this.send(
+                targetPeer,
+                {
+                    type: 'data',
+                    sender: sender.id,
+                    payload: data.payload
+                }
+            );
         }
     }
 
+    // =======================================================================================
+    // DISCONNECTION
+    // =======================================================================================
+
+    /**
+     * Handles a disconnected peer.
+     */
     handleDisconnect(peer) {
-        this.log(`Peer desconectado: ${peer.id}`);
-        
-        // Remove da lista global
+        this.log(
+            `Peer disconnected: ${peer.id}`
+        );
+
         this.peers.delete(peer.id);
 
-        if (peer.roomKey && this.rooms.has(peer.roomKey)) {
-            const roomData = this.rooms.get(peer.roomKey);
+        /**
+         * The peer was not inside a room.
+         */
+        if (
+            !peer.roomKey ||
+            !this.rooms.has(peer.roomKey)
+        ) {
+            return;
+        }
 
-            if (peer.isHost) {
-                // CASO CRÍTICO: O Host saiu. 
-                // Opção A: Derrubar a sala (mais seguro para sync de jogos).
-                // Opção B: Migrar Host (complexo para WebRTC).
-                // Vamos usar Opção A: Avisar a todos que a sala fechou.
-                
-                this.log(`HOST saiu da sala ${peer.roomKey}. Encerrando sala.`);
-                
-                roomData.peers.forEach(clientId => {
-                    const clientPeer = this.peers.get(clientId);
+        const roomData = this.rooms.get(
+            peer.roomKey
+        );
+
+        // ===================================================================================
+        // HOST DISCONNECTED
+        // ===================================================================================
+
+        if (peer.isHost) {
+            /**
+             * The Host owns the room.
+             *
+             * When the Host disconnects, the room is destroyed because
+             * there is no Host migration mechanism.
+             */
+            this.log(
+                `HOST left room ${peer.roomKey}. Closing room.`
+            );
+
+            roomData.peers.forEach(
+                (clientId) => {
+                    const clientPeer = this.peers.get(
+                        clientId
+                    );
+
                     if (clientPeer) {
-                        this.send(clientPeer, { type: 'host-disconnected', message: 'O Host encerrou a sessão.' });
-                        clientPeer.roomKey = null; // Reseta estado do cliente
+                        this.send(
+                            clientPeer,
+                            {
+                                type: 'host-disconnected',
+                                message: 'The Host has ended the session.'
+                            }
+                        );
+
+                        clientPeer.roomKey = null;
                     }
-                });
-
-                this.rooms.delete(peer.roomKey);
-
-            } else {
-                // Apenas um cliente saiu
-                roomData.peers.delete(peer.id);
-                
-                // Avisa o Host que o cliente saiu
-                const hostPeer = this.peers.get(roomData.hostId);
-                if (hostPeer) {
-                    this.send(hostPeer, {
-                        type: 'peer-left',
-                        peerId: peer.id
-                    });
                 }
-            }
+            );
+
+            this.rooms.delete(
+                peer.roomKey
+            );
+
+            return;
+        }
+
+        // ===================================================================================
+        // CLIENT DISCONNECTED
+        // ===================================================================================
+
+        roomData.peers.delete(
+            peer.id
+        );
+
+        /**
+         * Only the Host needs to be notified about a client leaving.
+         */
+        const hostPeer = this.peers.get(
+            roomData.hostId
+        );
+
+        if (hostPeer) {
+            this.send(
+                hostPeer,
+                {
+                    type: 'peer-left',
+                    peerId: peer.id
+                }
+            );
         }
     }
 
+    // =======================================================================================
+    // SEND
+    // =======================================================================================
+
+    /**
+     * Sends a JSON message to a peer when its WebSocket is open.
+     */
     send(peer, data) {
-        if (peer.socket.readyState === WebSocket.OPEN) {
-            peer.socket.send(JSON.stringify(data));
+        if (
+            peer &&
+            peer.socket.readyState === WebSocket.OPEN
+        ) {
+            peer.socket.send(
+                JSON.stringify(data)
+            );
         }
     }
 
+    // =======================================================================================
+    // ERROR
+    // =======================================================================================
+
+    /**
+     * Sends a standardized error response to a peer.
+     */
     sendError(peer, code, msg) {
-        this.send(peer, { type: 'error', code: code, message: msg });
+        this.send(
+            peer,
+            {
+                type: 'error',
+                code,
+                message: msg
+            }
+        );
     }
 
+    // =======================================================================================
+    // HEARTBEAT
+    // =======================================================================================
+
+    /**
+     * Periodically checks whether connected peers are still responsive.
+     *
+     * Peers that fail to respond to the heartbeat are terminated.
+     */
     startHeartbeat() {
-        setInterval(() => {
-            this.peers.forEach((peer) => {
-                if (peer.isAlive === false) return peer.socket.terminate();
-                peer.isAlive = false;
-                peer.socket.ping();
-            });
-        }, PING_INTERVAL);
+        setInterval(
+            () => {
+                this.peers.forEach(
+                    (peer) => {
+                        if (peer.isAlive === false) {
+                            return peer.socket.terminate();
+                        }
+
+                        peer.isAlive = false;
+
+                        peer.socket.ping();
+                    }
+                );
+            },
+            PING_INTERVAL
+        );
     }
 
-    generateId() { return crypto.randomBytes(4).toString('hex'); }
+    // =======================================================================================
+    // ID GENERATION
+    // =======================================================================================
 
+    /**
+     * Generates a short random ID for a peer.
+     */
+    generateId() {
+        return crypto
+            .randomBytes(4)
+            .toString('hex');
+    }
+
+    // =======================================================================================
+    // LOG
+    // =======================================================================================
+
+    /**
+     * Writes a timestamped structured message to the console.
+     */
     log(message, level = 'INFO') {
-        console.log(`[${new Date().toISOString()}] [${level}] ${message}`);
+        console.log(
+            `[${new Date().toISOString()}] [${level}] ${message}`
+        );
     }
 }
 
-// Inicialização
-const app = new Pearl2PServer(process.env.PORT || DEFAULT_PORT);
+// ===========================================================================================
+// START SERVER
+// ===========================================================================================
+
+/**
+ * Uses the PORT environment variable when available.
+ * Falls back to the default port otherwise.
+ */
+const app = new Pearl2PServer(
+    process.env.PORT || DEFAULT_PORT
+);
