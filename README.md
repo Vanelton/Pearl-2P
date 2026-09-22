@@ -1,80 +1,409 @@
-# Pearl-2P Signaling Server (Multi-Project Host Logic)
-Um servidor de sinalização Opensource agnóstico, projetado para servir múltiplos projetos simultaneamente com lógica de descoberta automática de Host.
+# Pearl-2P Signaling Server
+
+Um servidor de sinalização open-source e agnóstico, projetado para servir múltiplos projetos simultaneamente com lógica automática de descoberta de Host.
 
 **Autores do código:** Vanelton Junior, Lucas de Morais
 **Organização:** Vanelton Open Labs / Vanelton Media
 
 ## 📖 Como Funciona
-Diferente de servidores simples que apenas trocam mensagens, o Pearl-2P gerencia Salas Virtuais. A lógica é focada na distribuição de IDs baseada em "Quem chegou primeiro".
 
-- Host Automático: Ao enviar os dados do seu projeto, se a sala não existir, você se torna o Host.
-- Conexão de Peers: Se a sala já existe, o servidor detecta o Host automaticamente e devolve o hostId para o novo peer.
-- Isolamento: Projetos diferentes (MyGameRPG, ChatApp) nunca se misturam, mesmo usando o mesmo servidor.
+O Pearl-2P gerencia salas virtuais e facilita a comunicação inicial entre peers que ainda não possuem uma conexão direta.
 
-## 🚀 API de Comunicação (JSON)
+A identificação de uma sala é feita através de três informações:
 
-### 1. Conexão Inicial e Registro (Join Room)
-Assim que conectar via WebSocket, envie este comando para registrar sua instância.
+* `project`: identifica o projeto.
+* `instance`: identifica a instância do projeto.
+* `key`: identifica a sala dentro daquela instância.
 
-**Envio (Cliente -> Servidor):**
+A estrutura é:
+
+```text
+PROJECT -> INSTANCE -> KEY
+```
+
+### Host Automático
+
+Ao tentar entrar em uma sala:
+
+* Se a sala não existir, o peer se torna automaticamente o Host.
+* Se a sala já existir, o peer entra como Cliente e recebe o `hostId`.
+* O Host é responsável pela comunicação P2P com os demais peers.
+
+### Isolamento
+
+Projetos diferentes podem utilizar o mesmo servidor Pearl-2P sem misturar suas salas.
+
+Por exemplo:
+
+```text
+game-a#production#room123
+game-b#production#room123
+```
+
+São salas diferentes porque pertencem a projetos diferentes.
+
+### Metadata
+
+As salas também podem possuir um objeto `metadata`.
+
+O Pearl-2P não define sua estrutura e não depende de seus campos. Os dados são armazenados e retornados pelo servidor para que o projeto possa utilizá-los conforme sua própria necessidade.
+
+Exemplo:
+
 ```json
 {
-  "type": "join-room",
-  "payload": {
-    "project": "NomeDoSeuJogoOuApp",
-    "instance": "Versao1.0",
-    "room": "SalaDoBoss" 
+  "metadata": {
+    "name": "My Room",
+    "mode": 1,
+    "players": 4
   }
 }
 ```
 
-**Resposta A - Se você for o PRIMEIRO (Host):**
+---
+
+# 🚀 API de Comunicação (JSON)
+
+## 1. Conexão Inicial
+
+Ao estabelecer uma conexão WebSocket, o servidor envia automaticamente um `welcome` contendo o ID atribuído ao peer.
+
+**Servidor → Cliente:**
+
+```json
+{
+  "type": "welcome",
+  "id": "a7f3b9c1",
+  "message": "Connected to Pearl-2P. Waiting for room data (join-room)."
+}
+```
+
+O `id` recebido identifica o peer durante aquela conexão.
+
+---
+
+## 2. Criar ou Entrar em uma Sala
+
+Para criar ou entrar em uma sala, envie `join-room`.
+
+**Cliente → Servidor:**
+
+```json
+{
+  "type": "join-room",
+  "payload": {
+    "project": "MyGame",
+    "instance": "production",
+    "key": "room123",
+    "metadata": {
+      "name": "My Room",
+      "mode": 1
+    }
+  }
+}
+```
+
+`project` e `key` são obrigatórios.
+
+`instance` é opcional. Caso não seja informado, o servidor utiliza:
+
+```text
+default
+```
+
+`metadata` também é opcional.
+
+---
+
+## 3. Resposta do Host
+
+Se a sala ainda não existir, o peer se torna automaticamente o Host.
+
+**Servidor → Cliente:**
+
 ```json
 {
   "type": "room-created",
   "role": "host",
-  "message": "Você é o Host. Aguardando peers..."
+  "project": "MyGame",
+  "instance": "production",
+  "key": "room123",
+  "metadata": {
+    "name": "My Room",
+    "mode": 1
+  }
 }
 ```
 
-**Resposta B - Se já houver um Host na sala (Cliente):**
+O primeiro peer a entrar na sala assume o papel de Host.
+
+---
+
+## 4. Resposta do Cliente
+
+Se a sala já existir, o peer entra como Cliente.
+
+**Servidor → Cliente:**
+
 ```json
 {
   "type": "room-joined",
   "role": "client",
-  "hostId": "id_do_host_detectado" 
+  "project": "MyGame",
+  "instance": "production",
+  "key": "room123",
+  "hostId": "a7f3b9c1",
+  "metadata": {
+    "name": "My Room",
+    "mode": 1
+  }
 }
 ```
 
-O cliente recebe o hostId e deve iniciar imediatamente a Oferta WebRTC para este ID.
+O `hostId` identifica o Host atual da sala.
 
-### 2. Sinalização P2P (Handshake)
-Após receber o ID do Host (se for cliente) ou receber um Peer (se for Host), use o sistema de sinalização padrão.
+O cliente pode então iniciar a sinalização WebRTC com esse peer.
 
-**Envio (Você -> Outro):**
+---
+
+# 🔎 5. Listagem de Salas
+
+O Pearl-2P permite consultar as salas atualmente ativas através de `list-rooms`.
+
+**Cliente → Servidor:**
+
+```json
+{
+  "type": "list-rooms",
+  "payload": {
+    "project": "MyGame",
+    "instance": "production"
+  }
+}
+```
+
+Os filtros `project` e `instance` são opcionais.
+
+Para solicitar todas as salas:
+
+```json
+{
+  "type": "list-rooms"
+}
+```
+
+### Resposta
+
+**Servidor → Cliente:**
+
+```json
+{
+  "type": "rooms-list",
+  "total": 1,
+  "rooms": [
+    {
+      "project": "MyGame",
+      "instance": "production",
+      "key": "room123",
+      "hostId": "a7f3b9c1",
+      "peerCount": 4,
+      "metadata": {
+        "name": "My Room",
+        "mode": 1
+      }
+    }
+  ]
+}
+```
+
+A listagem retorna o `metadata` armazenado junto com cada sala.
+
+Isso permite que o próprio cliente determine quais informações deseja exibir ou utilizar.
+
+---
+
+# 🔗 6. Sinalização P2P
+
+Depois que os peers conhecerem seus respectivos IDs, o Pearl-2P pode ser utilizado para encaminhar mensagens de sinalização WebRTC.
+
+**Cliente → Servidor:**
+
 ```json
 {
   "type": "signal",
-  "target": "ID_DO_DESTINATARIO", 
-  "payload": { "sdp": "...", "type": "offer" }
+  "target": "ID_DO_DESTINATARIO",
+  "payload": {
+    "sdp": "...",
+    "type": "offer"
+  }
 }
 ```
 
-(O campo target é preenchido com o hostId recebido no passo anterior ou o ID do peer que acabou de entrar).
+O servidor encaminha o conteúdo ao peer especificado.
 
-### 3. Eventos de Controle
-- peer-joined: Enviado ao Host quando um novo cliente entra na sala. Contém { peerId: "..." }.
-- host-disconnected: Enviado aos Clientes se o Host fechar o jogo/app. A sala é destruída.
+**Servidor → Cliente:**
 
-## 📦 Instalação
+```json
+{
+  "type": "signal",
+  "sender": "ID_DO_REMETENTE",
+  "payload": {
+    "sdp": "...",
+    "type": "offer"
+  }
+}
+```
+
+O Pearl-2P não interpreta o conteúdo de `payload`. Ele apenas realiza o encaminhamento entre os peers.
+
+---
+
+# 📡 7. Mensagens de Dados
+
+Também é possível encaminhar dados genéricos entre peers através de `data`.
+
+**Cliente → Servidor:**
+
+```json
+{
+  "type": "data",
+  "target": "ID_DO_DESTINATARIO",
+  "payload": {
+    "message": "Hello!"
+  }
+}
+```
+
+O servidor encaminhará:
+
+```json
+{
+  "type": "data",
+  "sender": "ID_DO_REMETENTE",
+  "payload": {
+    "message": "Hello!"
+  }
+}
+```
+
+O conteúdo de `payload` é definido pelo projeto.
+
+---
+
+# 👥 8. Eventos da Sala
+
+## peer-joined
+
+Enviado ao Host quando um novo peer entra na sala.
+
+```json
+{
+  "type": "peer-joined",
+  "peerId": "b8c4d2e1"
+}
+```
+
+O Host pode utilizar o `peerId` para iniciar a sinalização WebRTC.
+
+---
+
+## peer-left
+
+Enviado ao Host quando um Cliente deixa a sala.
+
+```json
+{
+  "type": "peer-left",
+  "peerId": "b8c4d2e1"
+}
+```
+
+---
+
+## host-disconnected
+
+Enviado aos Clientes quando o Host se desconecta.
+
+```json
+{
+  "type": "host-disconnected",
+  "message": "The Host has ended the session."
+}
+```
+
+Quando o Host sai, a sala é encerrada.
+
+---
+
+# ❌ 9. Erros
+
+Quando uma operação não pode ser executada, o servidor pode responder com:
+
+```json
+{
+  "type": "error",
+  "code": 400,
+  "message": "Missing data: project and key are required."
+}
+```
+
+Códigos utilizados pelo servidor incluem:
+
+* `400` — dados inválidos ou incompletos.
+* `404` — peer de destino não encontrado.
+
+---
+
+# 📦 Instalação
+
+Clone o repositório e instale as dependências:
+
 ```bash
 npm install
+```
+
+Inicie o servidor:
+
+```bash
 node pearl.js
 ```
 
-## 🤝 Contribuindo
-Contribuições são bem-vindas! Sinta-se à vontade para abrir issues ou pull requests para melhorar a arquitetura, adicionar suporte a Salas (Rooms) ou autenticação.
+Por padrão, o servidor utiliza a porta:
 
-## 📄 Licença
+```text
+19950
+```
+
+Também é possível definir uma porta através da variável de ambiente `PORT`:
+
+```bash
+PORT=3000 node pearl.js
+```
+
+---
+
+# 🛠️ Dependências
+
+O Pearl-2P foi desenvolvido para possuir uma estrutura simples e poucas dependências.
+
+A principal dependência é:
+
+```text
+ws
+```
+
+---
+
+# 🤝 Contribuindo
+
+Contribuições são bem-vindas.
+
+Issues, sugestões e pull requests podem ser utilizados para propor melhorias, correções e novas funcionalidades para o projeto.
+
+---
+
+# 📄 Licença
+
 Este projeto está licenciado sob a Licença MIT.
-Copyright © 2025-Presente Vanelton Open Labs / Vanelton Media.
+
+Copyright © 2026-Presente Vanelton Open Labs / Vanelton Media.
