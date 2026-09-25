@@ -2,7 +2,7 @@
  * ===========================================================================================
  * Pearl-2P (Signaling Server)
  * ORGANIZAÇÃO:     Vanelton Open Labs / Vanelton Media
- * VERSÃO:          1.1.0
+ * VERSÃO:          1.1.1
  * LICENÇA:         MIT License
  *
  * DESCRIÇÃO:
@@ -21,13 +21,6 @@
  * Informações adicionais podem ser armazenadas em `metadata`.
  * Sua estrutura é definida pelo cliente e não é interpretada pelo servidor.
  *
- * Exemplo:
- *
- *     metadata: {
- *         name: "My Room",
- *         mode: 1
- *     }
- *
  * O servidor atua como intermediário para que clientes possam trocar
  * informações necessárias para estabelecer uma conexão direta.
  *
@@ -42,6 +35,7 @@
  * - Listagem de salas ativas.
  * - Heartbeat para conexões.
  * - Logs estruturados.
+ * - Suporte a saída explícita de sala (leave-room) sem desconectar o WebSocket.
  *
  * ===========================================================================================
  */
@@ -147,7 +141,7 @@ class Pearl2PServer {
 
         this.server.listen(this.port, () => {
             this.log(
-                `Pearl-2P Server v1.1.0 running on port ${this.port}`
+                `Pearl-2P Server v1.1.1 running on port ${this.port}`
             );
 
             this.log(
@@ -223,6 +217,7 @@ class Pearl2PServer {
      * Supported message types:
      *
      * - join-room
+     * - leave-room
      * - signal
      * - data
      * - list-rooms
@@ -237,6 +232,10 @@ class Pearl2PServer {
                         sender,
                         data.payload
                     );
+                    break;
+
+                case 'leave-room':
+                    this.handleLeaveRoom(sender);
                     break;
 
                 case 'signal':
@@ -443,6 +442,84 @@ class Pearl2PServer {
     }
 
     // =======================================================================================
+    // LEAVE ROOM
+    // =======================================================================================
+
+    /**
+     * Handles a peer explicitly leaving a room without disconnecting the WebSocket.
+     */
+    handleLeaveRoom(peer) {
+        if (!peer.roomKey || !this.rooms.has(peer.roomKey)) {
+            return;
+        }
+
+        const roomData = this.rooms.get(peer.roomKey);
+
+        if (peer.isHost) {
+            /**
+             * The Host owns the room.
+             *
+             * When the Host explicitly leaves, the room is destroyed.
+             */
+            this.log(
+                `HOST ${peer.id} explicitly left room ${peer.roomKey}. Closing room.`
+            );
+
+            roomData.peers.forEach(
+                (clientId) => {
+                    const clientPeer = this.peers.get(
+                        clientId
+                    );
+
+                    if (clientPeer) {
+                        this.send(
+                            clientPeer,
+                            {
+                                type: 'host-disconnected',
+                                message: 'The Host has ended the session.'
+                            }
+                        );
+
+                        clientPeer.roomKey = null;
+                    }
+                }
+            );
+
+            this.rooms.delete(
+                peer.roomKey
+            );
+        } else {
+            /**
+             * A client is leaving. Remove them from the room and notify the Host.
+             */
+            this.log(
+                `Client ${peer.id} explicitly left room ${peer.roomKey}.`
+            );
+
+            roomData.peers.delete(
+                peer.id
+            );
+
+            peer.roomKey = null;
+            peer.isHost = false;
+
+            const hostPeer = this.peers.get(
+                roomData.hostId
+            );
+
+            if (hostPeer) {
+                this.send(
+                    hostPeer,
+                    {
+                        type: 'peer-left',
+                        peerId: peer.id
+                    }
+                );
+            }
+        }
+    }
+
+    // =======================================================================================
     // LIST ROOMS
     // =======================================================================================
 
@@ -595,7 +672,7 @@ class Pearl2PServer {
              * there is no Host migration mechanism.
              */
             this.log(
-                `HOST left room ${peer.roomKey}. Closing room.`
+                `HOST disconnected from room ${peer.roomKey}. Closing room.`
             );
 
             roomData.peers.forEach(
